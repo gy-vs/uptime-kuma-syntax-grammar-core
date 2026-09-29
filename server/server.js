@@ -757,6 +757,15 @@ let needSetup = false;
                 if (monitor.retryOnlyOnStatusCodeFailure !== undefined) {
                     bean.retry_only_on_status_code_failure = monitor.retryOnlyOnStatusCodeFailure;
                 }
+                if (monitor.saveErrorResponse !== undefined) {
+                    bean.save_error_response = monitor.saveErrorResponse;
+                }
+                if (monitor.saveSuccessfulResponse !== undefined) {
+                    bean.save_successful_response = monitor.saveSuccessfulResponse;
+                }
+                if (monitor.responseMaxLength !== undefined) {
+                    bean.response_max_length = monitor.responseMaxLength;
+                }
                 bean.user_id = socket.userID;
 
                 bean.validate();
@@ -924,6 +933,17 @@ let needSetup = false;
                 bean.ping_count = monitor.ping_count;
                 bean.ping_per_request_timeout = monitor.ping_per_request_timeout;
 
+                // HTTP response body saving
+                if (monitor.saveErrorResponse !== undefined) {
+                    bean.save_error_response = monitor.saveErrorResponse;
+                }
+                if (monitor.saveSuccessfulResponse !== undefined) {
+                    bean.save_successful_response = monitor.saveSuccessfulResponse;
+                }
+                if (monitor.responseMaxLength !== undefined) {
+                    bean.response_max_length = monitor.responseMaxLength;
+                }
+
                 bean.validate();
 
                 await R.store(bean);
@@ -1034,6 +1054,11 @@ let needSetup = false;
                 `,
                     [monitorID, -period]
                 );
+
+                // The raw, gzip + base64 encoded response is not part of the beats chart data
+                for (let heartbeat of list) {
+                    delete heartbeat.response;
+                }
 
                 callback({
                     ok: true,
@@ -1393,9 +1418,12 @@ let needSetup = false;
                     );
                 }
 
+                // Backwards compatible: the heartbeat response is not included by default
+                const data = await Promise.all(list.map((bean) => bean.toJSONAsync()));
+
                 callback({
                     ok: true,
-                    data: list,
+                    data: data,
                 });
             } catch (e) {
                 callback({

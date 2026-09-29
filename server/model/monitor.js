@@ -24,6 +24,9 @@ const {
     PING_PER_REQUEST_TIMEOUT_MIN,
     PING_PER_REQUEST_TIMEOUT_MAX,
     PING_PER_REQUEST_TIMEOUT_DEFAULT,
+    RESPONSE_MAX_LENGTH_MIN,
+    RESPONSE_MAX_LENGTH_MAX,
+    RESPONSE_MAX_LENGTH_DEFAULT,
 } = require("../../src/util");
 const {
     ping,
@@ -57,6 +60,7 @@ const { HttpsCookieAgent } = require("http-cookie-agent/http");
 const https = require("https");
 const http = require("http");
 const DomainExpiry = require("./domain_expiry");
+const Heartbeat = require("./heartbeat");
 
 const rootCertificates = rootCertificatesFingerprints();
 
@@ -203,6 +207,11 @@ class Monitor extends BeanModel {
             ping_numeric: this.isPingNumeric(),
             ping_count: this.ping_count,
             ping_per_request_timeout: this.ping_per_request_timeout,
+
+            // HTTP response body saving
+            saveErrorResponse: this.isSaveErrorResponse(),
+            saveSuccessfulResponse: this.isSaveSuccessfulResponse(),
+            responseMaxLength: this.getResponseMaxLength(),
         };
 
         if (includeSensitiveData) {
@@ -304,6 +313,40 @@ class Monitor extends BeanModel {
      */
     isPingNumeric() {
         return Boolean(this.ping_numeric);
+    }
+
+    /**
+     * Should the response body of failed checks be saved?
+     * @returns {boolean} Save error response?
+     */
+    isSaveErrorResponse() {
+        // Default to enabled for monitors created before this option existed
+        if (this.save_error_response === null || this.save_error_response === undefined) {
+            return true;
+        }
+        return Boolean(this.save_error_response);
+    }
+
+    /**
+     * Should the response body of successful checks be saved?
+     * @returns {boolean} Save successful response?
+     */
+    isSaveSuccessfulResponse() {
+        return Boolean(this.save_successful_response);
+    }
+
+    /**
+     * Get the maximum number of characters of the response body to save
+     * @returns {number} Maximum response body length
+     */
+    getResponseMaxLength() {
+        let maxLength = parseInt(this.response_max_length);
+
+        if (!Number.isFinite(maxLength)) {
+            return RESPONSE_MAX_LENGTH_DEFAULT;
+        }
+
+        return Math.min(Math.max(maxLength, RESPONSE_MAX_LENGTH_MIN), RESPONSE_MAX_LENGTH_MAX);
     }
 
     /**
@@ -443,6 +486,9 @@ class Monitor extends BeanModel {
             if (!this.timeout || this.timeout <= 0) {
                 this.timeout = this.interval * 1000 * 0.8;
             }
+
+            // Response body captured during the HTTP/keyword/json-query check
+            let httpResponseData = null;
 
             try {
                 if (await Monitor.isUnderMaintenance(this.id)) {
@@ -616,6 +662,9 @@ class Monitor extends BeanModel {
 
                     // Make Request
                     let res = await this.makeAxiosRequest(options);
+
+                    // Capture the response body, it is stored to the heartbeat later depending on the monitor config
+                    httpResponseData = res.data;
 
                     bean.msg = `${res.status} - ${res.statusText}`;
                     bean.ping = dayjs().valueOf() - startTime;
@@ -931,6 +980,15 @@ class Monitor extends BeanModel {
                     bean.msg = error.message;
                 }
 
+                // Capture the response body of failed HTTP/keyword/json-query checks
+                // (e.g. status codes outside of the accepted range such as 500)
+                if (
+                    (this.type === "http" || this.type === "keyword" || this.type === "json-query") &&
+                    error?.response?.data !== undefined
+                ) {
+                    httpResponseData = error.response.data;
+                }
+
                 // If UP come in here, it must be upside down mode
                 // Just reset the retries
                 if (this.isUpsideDown() && bean.status === UP) {
@@ -965,6 +1023,33 @@ class Monitor extends BeanModel {
             }
 
             bean.retries = retries;
+
+            // Store the response body according to the monitor config
+            // UP -> save only if "Save successful response" is enabled
+            // DOWN/PENDING -> save only if "Save error response" is enabled
+            // MAINTENANCE -> never save
+            if (this.type === "http" || this.type === "keyword" || this.type === "json-query") {
+                let shouldSaveResponse = false;
+
+                if (bean.status === UP) {
+                    shouldSaveResponse = this.isSaveSuccessfulResponse();
+                } else if (bean.status === DOWN || bean.status === PENDING) {
+                    shouldSaveResponse = this.isSaveErrorResponse();
+                }
+
+                if (shouldSaveResponse && httpResponseData !== null && httpResponseData !== undefined) {
+                    let responseText = httpResponseData;
+
+                    // Convert to string for object/array/buffer
+                    if (Buffer.isBuffer(responseText)) {
+                        responseText = responseText.toString("utf8");
+                    } else if (typeof responseText !== "string") {
+                        responseText = JSON.stringify(responseText);
+                    }
+
+                    bean.response = await Heartbeat.encodeResponse(responseText, this.getResponseMaxLength());
+                }
+            }
 
             log.debug("monitor", `[${this.name}] Check isImportant`);
             let isImportant = Monitor.isImportantBeat(isFirstBeat, previousBeat?.status, bean.status);
@@ -1057,7 +1142,7 @@ class Monitor extends BeanModel {
 
             // Send to frontend
             log.debug("monitor", `[${this.name}] Send to socket`);
-            io.to(this.user_id).emit("heartbeat", bean.toJSON());
+            io.to(this.user_id).emit("heartbeat", await bean.toJSONAsync({ includeResponse: true }));
             Monitor.sendStats(io, this.id, this.user_id);
 
             // Store to database
@@ -1435,7 +1520,7 @@ class Monitor extends BeanModel {
 
             for (let notification of notificationList) {
                 try {
-                    const heartbeatJSON = bean.toJSON();
+                    const heartbeatJSON = await bean.toJSONAsync({ includeResponse: true });
                     const monitorData = [{ id: monitor.id, active: monitor.active, name: monitor.name }];
                     const preloadData = await Monitor.preparePreloadData(monitorData);
                     // Prevent if the msg is undefined, notifications such as Discord cannot send out.
@@ -1640,6 +1725,22 @@ class Monitor extends BeanModel {
         }
         if (this.retryInterval < MIN_INTERVAL_SECOND) {
             throw new Error(`Retry interval cannot be less than ${MIN_INTERVAL_SECOND} seconds`);
+        }
+
+        if (this.type === "http" || this.type === "keyword" || this.type === "json-query") {
+            const responseMaxLength = parseInt(this.response_max_length);
+
+            if (!Number.isFinite(responseMaxLength)) {
+                throw new Error(`Response max length must be a number (default: ${RESPONSE_MAX_LENGTH_DEFAULT})`);
+            }
+
+            if (responseMaxLength < RESPONSE_MAX_LENGTH_MIN || responseMaxLength > RESPONSE_MAX_LENGTH_MAX) {
+                throw new Error(
+                    `Response max length must be between ${RESPONSE_MAX_LENGTH_MIN} and ${RESPONSE_MAX_LENGTH_MAX} (default: ${RESPONSE_MAX_LENGTH_DEFAULT})`
+                );
+            }
+
+            this.response_max_length = responseMaxLength;
         }
 
         if (this.type === "ping") {

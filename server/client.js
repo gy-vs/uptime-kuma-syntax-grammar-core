@@ -3,6 +3,7 @@
  */
 const { TimeLogger } = require("../src/util");
 const { R } = require("redbean-node");
+const Heartbeat = require("./model/heartbeat");
 const { UptimeKumaServer } = require("./uptime-kuma-server");
 const server = UptimeKumaServer.getInstance();
 const io = server.io;
@@ -41,9 +42,11 @@ async function sendNotificationList(socket) {
  * @param {number} monitorID ID of monitor to send heartbeat history
  * @param {boolean} toUser  True = send to all browsers with the same user id, False = send to the current browser only
  * @param {boolean} overwrite Overwrite client-side's heartbeat list
+ * @param {object} options Serialization options
+ * @param {boolean} options.includeResponse Include the decoded response body as "response"
  * @returns {Promise<void>}
  */
-async function sendHeartbeatList(socket, monitorID, toUser = false, overwrite = false) {
+async function sendHeartbeatList(socket, monitorID, toUser = false, overwrite = false, options = {}) {
     let list = await R.getAll(
         `
         SELECT * FROM heartbeat
@@ -53,6 +56,16 @@ async function sendHeartbeatList(socket, monitorID, toUser = false, overwrite = 
     `,
         [monitorID]
     );
+
+    // The raw, gzip + base64 encoded response must not leak to clients.
+    // It is decoded and included only when explicitly requested.
+    for (let heartbeat of list) {
+        if (options.includeResponse) {
+            heartbeat.response = Heartbeat.decodeResponse(heartbeat.response);
+        } else {
+            delete heartbeat.response;
+        }
+    }
 
     let result = list.reverse();
 
@@ -69,9 +82,11 @@ async function sendHeartbeatList(socket, monitorID, toUser = false, overwrite = 
  * @param {number} monitorID ID of monitor to send heartbeat history
  * @param {boolean} toUser  True = send to all browsers with the same user id, False = send to the current browser only
  * @param {boolean} overwrite Overwrite client-side's heartbeat list
+ * @param {object} options Serialization options
+ * @param {boolean} options.includeResponse Include the decoded response body as "response"
  * @returns {Promise<void>}
  */
-async function sendImportantHeartbeatList(socket, monitorID, toUser = false, overwrite = false) {
+async function sendImportantHeartbeatList(socket, monitorID, toUser = false, overwrite = false, options = {}) {
     const timeLogger = new TimeLogger();
 
     let list = await R.find(
@@ -87,10 +102,13 @@ async function sendImportantHeartbeatList(socket, monitorID, toUser = false, ove
 
     timeLogger.print(`[Monitor: ${monitorID}] sendImportantHeartbeatList`);
 
+    // Backwards compatible by default: the response is omitted unless explicitly requested
+    const result = await Promise.all(list.map((bean) => bean.toJSONAsync(options)));
+
     if (toUser) {
-        io.to(socket.userID).emit("importantHeartbeatList", monitorID, list, overwrite);
+        io.to(socket.userID).emit("importantHeartbeatList", monitorID, result, overwrite);
     } else {
-        socket.emit("importantHeartbeatList", monitorID, list, overwrite);
+        socket.emit("importantHeartbeatList", monitorID, result, overwrite);
     }
 }
 

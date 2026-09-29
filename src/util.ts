@@ -66,6 +66,11 @@ export const PING_PER_REQUEST_TIMEOUT_MIN = 1;
 export const PING_PER_REQUEST_TIMEOUT_MAX = 60;
 export const PING_PER_REQUEST_TIMEOUT_DEFAULT = 2;
 
+// HTTP response body saving limits in characters
+export const RESPONSE_MAX_LENGTH_MIN = 1;
+export const RESPONSE_MAX_LENGTH_MAX = 30000;
+export const RESPONSE_MAX_LENGTH_DEFAULT = 10240;
+
 // Console colors
 // https://stackoverflow.com/questions/9781218/how-to-change-node-jss-console-font-color
 export const CONSOLE_STYLE_Reset = "\x1b[0m";

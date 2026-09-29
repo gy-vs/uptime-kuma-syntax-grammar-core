@@ -1349,6 +1349,83 @@
                                 </div>
                             </div>
 
+                            <!-- Save error response: HTTP / Keyword / JSON query only -->
+                            <div
+                                v-if="
+                                    monitor.type === 'http' ||
+                                    monitor.type === 'keyword' ||
+                                    monitor.type === 'json-query'
+                                "
+                                class="my-3 form-check"
+                            >
+                                <input
+                                    id="save-error-response"
+                                    v-model="monitor.saveErrorResponse"
+                                    class="form-check-input"
+                                    type="checkbox"
+                                />
+                                <label class="form-check-label" for="save-error-response">
+                                    {{ $t("Save error response") }}
+                                </label>
+                                <i18n-t tag="div" class="form-text" keypath="saveErrorResponseDescription">
+                                    <template #heartbeatJSONResponse>
+                                        <code v-pre>{{ heartbeatJSON.response }}</code>
+                                    </template>
+                                </i18n-t>
+                            </div>
+
+                            <!-- Save successful response: HTTP / Keyword / JSON query only -->
+                            <div
+                                v-if="
+                                    monitor.type === 'http' ||
+                                    monitor.type === 'keyword' ||
+                                    monitor.type === 'json-query'
+                                "
+                                class="my-3 form-check"
+                            >
+                                <input
+                                    id="save-successful-response"
+                                    v-model="monitor.saveSuccessfulResponse"
+                                    class="form-check-input"
+                                    type="checkbox"
+                                />
+                                <label class="form-check-label" for="save-successful-response">
+                                    {{ $t("Save successful response") }}
+                                </label>
+                                <i18n-t tag="div" class="form-text" keypath="saveSuccessfulResponseDescription">
+                                    <template #heartbeatJSONResponse>
+                                        <code v-pre>{{ heartbeatJSON.response }}</code>
+                                    </template>
+                                </i18n-t>
+                            </div>
+
+                            <!-- Response max length: HTTP / Keyword / JSON query only -->
+                            <div
+                                v-if="
+                                    monitor.type === 'http' ||
+                                    monitor.type === 'keyword' ||
+                                    monitor.type === 'json-query'
+                                "
+                                class="my-3"
+                            >
+                                <label for="response-max-length" class="form-label">
+                                    {{ $t("Response max length") }}
+                                </label>
+                                <input
+                                    id="response-max-length"
+                                    v-model="monitor.responseMaxLength"
+                                    type="number"
+                                    class="form-control"
+                                    required
+                                    :min="responseMaxLengthMin"
+                                    :max="responseMaxLengthMax"
+                                    step="1"
+                                />
+                                <div class="form-text">
+                                    {{ $t("responseMaxLengthDescription") }}
+                                </div>
+                            </div>
+
                             <div class="my-3 form-check">
                                 <input
                                     id="upside-down"
@@ -2152,6 +2229,9 @@ import {
     MIN_INTERVAL_SECOND,
     sleep,
     TYPES_WITH_DOMAIN_EXPIRY_SUPPORT_VIA_FIELD,
+    RESPONSE_MAX_LENGTH_MIN,
+    RESPONSE_MAX_LENGTH_MAX,
+    RESPONSE_MAX_LENGTH_DEFAULT,
 } from "../util.ts";
 import { timeDurationFormatter } from "../util-frontend";
 import isFQDN from "validator/lib/isFQDN";
@@ -2212,6 +2292,9 @@ const monitorDefaults = {
     rabbitmqPassword: "",
     conditions: [],
     system_service_name: "",
+    saveErrorResponse: true,
+    saveSuccessfulResponse: false,
+    responseMaxLength: RESPONSE_MAX_LENGTH_DEFAULT,
 };
 
 export default {
@@ -2234,6 +2317,8 @@ export default {
         return {
             minInterval: MIN_INTERVAL_SECOND,
             maxInterval: MAX_INTERVAL_SECOND,
+            responseMaxLengthMin: RESPONSE_MAX_LENGTH_MIN,
+            responseMaxLengthMax: RESPONSE_MAX_LENGTH_MAX,
             processing: false,
             monitor: {
                 notificationIDList: {},
@@ -2972,6 +3057,27 @@ message HealthCheckResponse {
                 }
             }
 
+            // Validate response max length for HTTP / Keyword / JSON query monitors
+            if (["http", "keyword", "json-query"].includes(this.monitor.type)) {
+                const responseMaxLength = parseInt(this.monitor.responseMaxLength);
+
+                if (!Number.isFinite(responseMaxLength)) {
+                    toast.error(
+                        this.$t("responseMaxLengthInvalid", [RESPONSE_MAX_LENGTH_MIN, RESPONSE_MAX_LENGTH_MAX])
+                    );
+                    return false;
+                }
+
+                if (responseMaxLength < RESPONSE_MAX_LENGTH_MIN || responseMaxLength > RESPONSE_MAX_LENGTH_MAX) {
+                    toast.error(
+                        this.$t("responseMaxLengthInvalid", [RESPONSE_MAX_LENGTH_MIN, RESPONSE_MAX_LENGTH_MAX])
+                    );
+                    return false;
+                }
+
+                this.monitor.responseMaxLength = responseMaxLength;
+            }
+
             return true;
         },
 
@@ -3024,6 +3130,13 @@ message HealthCheckResponse {
             const monitorTypesWithEncodingAllowed = ["http", "keyword", "json-query"];
             if (this.monitor.type && !monitorTypesWithEncodingAllowed.includes(this.monitor.type)) {
                 this.monitor.httpBodyEncoding = null;
+            }
+
+            // Response body saving only applies to HTTP / Keyword / JSON query monitors
+            if (this.monitor.type && !monitorTypesWithEncodingAllowed.includes(this.monitor.type)) {
+                this.monitor.saveErrorResponse = true;
+                this.monitor.saveSuccessfulResponse = false;
+                this.monitor.responseMaxLength = RESPONSE_MAX_LENGTH_DEFAULT;
             }
 
             if (this.monitor.headers) {
