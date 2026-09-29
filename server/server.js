@@ -757,6 +757,15 @@ let needSetup = false;
                 if (monitor.retryOnlyOnStatusCodeFailure !== undefined) {
                     bean.retry_only_on_status_code_failure = monitor.retryOnlyOnStatusCodeFailure;
                 }
+                if (monitor.saveErrorResponse !== undefined) {
+                    bean.save_error_response = Boolean(monitor.saveErrorResponse);
+                }
+                if (monitor.saveSuccessfulResponse !== undefined) {
+                    bean.save_success_response = Boolean(monitor.saveSuccessfulResponse);
+                }
+                if (monitor.responseMaxLength !== undefined) {
+                    bean.response_max_length = monitor.responseMaxLength;
+                }
                 bean.user_id = socket.userID;
 
                 bean.validate();
@@ -924,6 +933,11 @@ let needSetup = false;
                 bean.ping_count = monitor.ping_count;
                 bean.ping_per_request_timeout = monitor.ping_per_request_timeout;
 
+                // HTTP response body saving
+                bean.save_error_response = monitor.saveErrorResponse;
+                bean.save_success_response = monitor.saveSuccessfulResponse;
+                bean.response_max_length = monitor.responseMaxLength;
+
                 bean.validate();
 
                 await R.store(bean);
@@ -1034,6 +1048,12 @@ let needSetup = false;
                 `,
                     [monitorID, -period]
                 );
+
+                // The response column stores the gzip + base64 encoded body and
+                // is not part of this API output for backwards compatibility.
+                for (let row of list) {
+                    delete row.response;
+                }
 
                 callback({
                     ok: true,

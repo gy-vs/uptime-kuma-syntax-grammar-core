@@ -24,6 +24,9 @@ const {
     PING_PER_REQUEST_TIMEOUT_MIN,
     PING_PER_REQUEST_TIMEOUT_MAX,
     PING_PER_REQUEST_TIMEOUT_DEFAULT,
+    RESPONSE_MAX_LENGTH_MIN,
+    RESPONSE_MAX_LENGTH_MAX,
+    RESPONSE_MAX_LENGTH_DEFAULT,
 } = require("../../src/util");
 const {
     ping,
@@ -57,6 +60,7 @@ const { HttpsCookieAgent } = require("http-cookie-agent/http");
 const https = require("https");
 const http = require("http");
 const DomainExpiry = require("./domain_expiry");
+const { encodeResponse } = require("./heartbeat");
 
 const rootCertificates = rootCertificatesFingerprints();
 
@@ -203,6 +207,11 @@ class Monitor extends BeanModel {
             ping_numeric: this.isPingNumeric(),
             ping_count: this.ping_count,
             ping_per_request_timeout: this.ping_per_request_timeout,
+
+            // HTTP response body saving
+            saveErrorResponse: this.isSaveErrorResponse(),
+            saveSuccessfulResponse: this.isSaveSuccessfulResponse(),
+            responseMaxLength: this.getResponseMaxLength(),
         };
 
         if (includeSensitiveData) {
@@ -304,6 +313,40 @@ class Monitor extends BeanModel {
      */
     isPingNumeric() {
         return Boolean(this.ping_numeric);
+    }
+
+    /**
+     * Parse to boolean
+     * Defaults to true for monitors created before this option existed.
+     * @returns {boolean} Should the response body be saved when a check fails?
+     */
+    isSaveErrorResponse() {
+        return this.save_error_response === null || this.save_error_response === undefined
+            ? true
+            : Boolean(this.save_error_response);
+    }
+
+    /**
+     * Parse to boolean
+     * Defaults to false for monitors created before this option existed.
+     * @returns {boolean} Should the response body be saved when a check succeeds?
+     */
+    isSaveSuccessfulResponse() {
+        return Boolean(this.save_success_response);
+    }
+
+    /**
+     * Get the maximum length (in characters) of the response body to save.
+     * Defaults to RESPONSE_MAX_LENGTH_DEFAULT for monitors created before
+     * this option existed.
+     * @returns {number} Maximum response length in characters
+     */
+    getResponseMaxLength() {
+        if (this.response_max_length === null || this.response_max_length === undefined) {
+            return RESPONSE_MAX_LENGTH_DEFAULT;
+        }
+
+        return Number(this.response_max_length);
     }
 
     /**
@@ -427,6 +470,10 @@ class Monitor extends BeanModel {
             }
 
             const isFirstBeat = !previousBeat;
+
+            // The last axios response of this beat (also populated from
+            // error.response on failure), used to save the response body.
+            let httpResponse = null;
 
             let bean = R.dispense("heartbeat");
             bean.monitor_id = this.id;
@@ -616,6 +663,7 @@ class Monitor extends BeanModel {
 
                     // Make Request
                     let res = await this.makeAxiosRequest(options);
+                    httpResponse = res;
 
                     bean.msg = `${res.status} - ${res.statusText}`;
                     bean.ping = dayjs().valueOf() - startTime;
@@ -925,6 +973,12 @@ class Monitor extends BeanModel {
 
                 retries = 0;
             } catch (error) {
+                // Keep the HTTP response (if any) so its body can be saved
+                // according to the "Save error response" setting.
+                if (error?.response) {
+                    httpResponse = error.response;
+                }
+
                 if (error?.name === "CanceledError") {
                     bean.msg = `timeout by AbortSignal (${this.timeout}s)`;
                 } else {
@@ -965,6 +1019,23 @@ class Monitor extends BeanModel {
             }
 
             bean.retries = retries;
+
+            // Save the HTTP response body (gzip + base64) according to the
+            // monitor configuration for successful/failed checks.
+            if (
+                (this.type === "http" || this.type === "keyword" || this.type === "json-query") &&
+                httpResponse
+            ) {
+                const shouldSave =
+                    bean.status === UP ? this.isSaveSuccessfulResponse() : this.isSaveErrorResponse();
+
+                if (shouldSave) {
+                    bean.response = await Monitor.prepareResponseForStorage(
+                        httpResponse.data,
+                        this.getResponseMaxLength()
+                    );
+                }
+            }
 
             log.debug("monitor", `[${this.name}] Check isImportant`);
             let isImportant = Monitor.isImportantBeat(isFirstBeat, previousBeat?.status, bean.status);
@@ -1057,7 +1128,7 @@ class Monitor extends BeanModel {
 
             // Send to frontend
             log.debug("monitor", `[${this.name}] Send to socket`);
-            io.to(this.user_id).emit("heartbeat", bean.toJSON());
+            io.to(this.user_id).emit("heartbeat", await bean.toJSONAsync());
             Monitor.sendStats(io, this.id, this.user_id);
 
             // Store to database
@@ -1112,6 +1183,38 @@ class Monitor extends BeanModel {
         } else {
             safeBeat();
         }
+    }
+
+    /**
+     * Convert an Axios response body to text, truncate it to maxLength and
+     * encode it (gzip + base64) for storage in heartbeat.response.
+     * @param {any} data Axios response body
+     * @param {number} maxLength Maximum length (in characters) to keep
+     * @returns {Promise<string|null>} Encoded response body or null
+     */
+    static async prepareResponseForStorage(data, maxLength) {
+        if (data === null || data === undefined) {
+            return null;
+        }
+
+        let text;
+        if (typeof data === "string") {
+            text = data;
+        } else if (Buffer.isBuffer(data)) {
+            text = data.toString("utf-8");
+        } else {
+            try {
+                text = JSON.stringify(data);
+            } catch (e) {
+                text = String(data);
+            }
+        }
+
+        if (maxLength >= 0) {
+            text = text.substring(0, maxLength);
+        }
+
+        return await encodeResponse(text);
     }
 
     /**
@@ -1435,7 +1538,7 @@ class Monitor extends BeanModel {
 
             for (let notification of notificationList) {
                 try {
-                    const heartbeatJSON = bean.toJSON();
+                    const heartbeatJSON = await bean.toJSONAsync(true);
                     const monitorData = [{ id: monitor.id, active: monitor.active, name: monitor.name }];
                     const preloadData = await Monitor.preparePreloadData(monitorData);
                     // Prevent if the msg is undefined, notifications such as Discord cannot send out.
@@ -1640,6 +1743,29 @@ class Monitor extends BeanModel {
         }
         if (this.retryInterval < MIN_INTERVAL_SECOND) {
             throw new Error(`Retry interval cannot be less than ${MIN_INTERVAL_SECOND} seconds`);
+        }
+
+        if (
+            this.type === "http" ||
+            this.type === "keyword" ||
+            this.type === "json-query"
+        ) {
+            const responseMaxLength = Number(this.response_max_length);
+
+            if (!Number.isFinite(responseMaxLength)) {
+                throw new Error("Response max length must be a number");
+            }
+
+            if (
+                responseMaxLength < RESPONSE_MAX_LENGTH_MIN ||
+                responseMaxLength > RESPONSE_MAX_LENGTH_MAX
+            ) {
+                throw new Error(
+                    `Response max length must be between ${RESPONSE_MAX_LENGTH_MIN} and ${RESPONSE_MAX_LENGTH_MAX} characters (default: ${RESPONSE_MAX_LENGTH_DEFAULT})`
+                );
+            }
+
+            this.response_max_length = Math.round(responseMaxLength);
         }
 
         if (this.type === "ping") {

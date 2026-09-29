@@ -54,6 +54,13 @@ async function sendHeartbeatList(socket, monitorID, toUser = false, overwrite = 
         [monitorID]
     );
 
+    // The "response" column stores the response body gzip compressed and
+    // base64 encoded. It is not needed by the heartbeat list, so it is
+    // stripped here to keep the payload small and backwards compatible.
+    for (let row of list) {
+        delete row.response;
+    }
+
     let result = list.reverse();
 
     if (toUser) {
@@ -85,12 +92,17 @@ async function sendImportantHeartbeatList(socket, monitorID, toUser = false, ove
         [monitorID]
     );
 
+    // For backwards compatibility the response body is not part of the
+    // important heartbeat list (it is stored gzip + base64 encoded and is
+    // only decoded where it is actually needed, e.g. notifications).
+    const result = list.map((bean) => bean.toJSON());
+
     timeLogger.print(`[Monitor: ${monitorID}] sendImportantHeartbeatList`);
 
     if (toUser) {
-        io.to(socket.userID).emit("importantHeartbeatList", monitorID, list, overwrite);
+        io.to(socket.userID).emit("importantHeartbeatList", monitorID, result, overwrite);
     } else {
-        socket.emit("importantHeartbeatList", monitorID, list, overwrite);
+        socket.emit("importantHeartbeatList", monitorID, result, overwrite);
     }
 }
 

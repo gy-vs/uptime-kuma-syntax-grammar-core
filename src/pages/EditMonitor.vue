@@ -1558,6 +1558,71 @@
                                         </template>
                                     </i18n-t>
                                 </div>
+
+                                <!-- Save response body: HTTP / Keyword / JSON query only -->
+                                <template
+                                    v-if="
+                                        monitor.type === 'http' ||
+                                        monitor.type === 'keyword' ||
+                                        monitor.type === 'json-query'
+                                    "
+                                >
+                                    <div class="my-3 form-check">
+                                        <input
+                                            id="save-error-response"
+                                            v-model="monitor.saveErrorResponse"
+                                            type="checkbox"
+                                            class="form-check-input"
+                                        />
+                                        <label for="save-error-response" class="form-check-label">
+                                            {{ $t("Save error response") }}
+                                        </label>
+                                        <div class="form-text">
+                                            {{ $t("saveErrorResponseDescription") }}
+                                        </div>
+                                    </div>
+
+                                    <div class="my-3 form-check">
+                                        <input
+                                            id="save-successful-response"
+                                            v-model="monitor.saveSuccessfulResponse"
+                                            type="checkbox"
+                                            class="form-check-input"
+                                        />
+                                        <label for="save-successful-response" class="form-check-label">
+                                            {{ $t("Save successful response") }}
+                                        </label>
+                                        <div class="form-text">
+                                            {{ $t("saveSuccessfulResponseDescription") }}
+                                        </div>
+                                    </div>
+
+                                    <div
+                                        v-if="monitor.saveErrorResponse || monitor.saveSuccessfulResponse"
+                                        class="my-3"
+                                    >
+                                        <label for="responseMaxLength" class="form-label">
+                                            {{ $t("Response max length") }}
+                                        </label>
+                                        <input
+                                            id="responseMaxLength"
+                                            v-model.number="monitor.responseMaxLength"
+                                            type="number"
+                                            class="form-control"
+                                            required
+                                            :min="responseMaxLengthMin"
+                                            :max="responseMaxLengthMax"
+                                            step="1"
+                                        />
+                                        <div class="form-text">
+                                            {{
+                                                $t("responseMaxLengthDescription", {
+                                                    max: responseMaxLengthMax,
+                                                })
+                                            }}
+                                        </div>
+                                    </div>
+                                </template>
                             </template>
 
                             <!-- Parent Monitor -->
@@ -2152,6 +2217,9 @@ import {
     MIN_INTERVAL_SECOND,
     sleep,
     TYPES_WITH_DOMAIN_EXPIRY_SUPPORT_VIA_FIELD,
+    RESPONSE_MAX_LENGTH_MIN,
+    RESPONSE_MAX_LENGTH_MAX,
+    RESPONSE_MAX_LENGTH_DEFAULT,
 } from "../util.ts";
 import { timeDurationFormatter } from "../util-frontend";
 import isFQDN from "validator/lib/isFQDN";
@@ -2177,6 +2245,9 @@ const monitorDefaults = {
     resendInterval: 0,
     maxretries: 0,
     retryOnlyOnStatusCodeFailure: false,
+    saveErrorResponse: true,
+    saveSuccessfulResponse: false,
+    responseMaxLength: RESPONSE_MAX_LENGTH_DEFAULT,
     notificationIDList: {},
     ignoreTls: false,
     upsideDown: false,
@@ -2234,6 +2305,8 @@ export default {
         return {
             minInterval: MIN_INTERVAL_SECOND,
             maxInterval: MAX_INTERVAL_SECOND,
+            responseMaxLengthMin: RESPONSE_MAX_LENGTH_MIN,
+            responseMaxLengthMax: RESPONSE_MAX_LENGTH_MAX,
             processing: false,
             monitor: {
                 notificationIDList: {},
